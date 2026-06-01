@@ -1,0 +1,38 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Lab artifacts & loot (NEVER commit real engagement data)
+loot/
+*.pcap
+*.cap
+*.kirbi
+*.ccache
+*.ntds
+*.dit
+hashes.txt
+cracked.txt
+*.key
+*.pem
+id_rsa*
+nxc.db
+bloodhound_*.json
+*.bloodhound
+*.zip
+
+# Vagrant / VM
+.vagrant/
+*.box
+*.vdi
+*.vmdk
+*.log
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
