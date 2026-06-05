@@ -1,0 +1,163 @@
+# =============================================================================
+# Zero to LPT Certified — Full multi-range lab (Vagrant + VirtualBox)
+# Builds a segmented network to practice the FULL chain: external foothold ->
+# pivot into AD -> double-pivot into a deep subnet.
+#
+#   Networks (VirtualBox internal networks = isolated, no internet leak):
+#     dmz       10.0.10.0/24   (attacker + web/DMZ foothold)
+#     internal  10.0.20.0/24   (AD DC + member + internal linux)  <- via pivot
+#     deep      10.0.30.0/24   (deep target)                       <- via double pivot
+#
+#   Hosts:
+#     attacker  10.0.10.5                      (Kali)
+#     web       10.0.10.20 + 10.0.20.21        (dual-homed foothold/pivot, Linux)
+#     dc        10.0.20.10                     (Windows Server, corp.local DC)
+#     member    10.0.20.20                     (Windows Server, member)
+#     linux2    10.0.20.30 + 10.0.30.31        (dual-homed, pivot to deep)
+#     deep      10.0.30.40                     (Linux deep target)
+#
+# Usage:
+#   vagrant up                 # bring up everything (heavy! see notes)
+#   vagrant up attacker web    # bring up a subset
+#   vagrant ssh web
+#   vagrant halt / vagrant destroy
+#
+# ⚠️  RESOURCES: full lab wants ~24-32GB RAM. Bring up subsets if limited.
+# ⚠️  INTENTIONALLY VULNERABLE + ISOLATED. Do not bridge to a real network.
+#
+# NOTE: Windows boxes (gusztavvargadr/windows-server) are large (~10GB) and the
+#       AD provisioning is left to the PowerShell scripts in ../windows (run them
+#       inside the VM via RDP/WinRM). Linux provisioning is inline below.
+# =============================================================================
+
+Vagrant.configure("2") do |config|
+  config.vm.boot_timeout = 600
+  # Disable the default synced folder for cleanliness (comment out if you want it)
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # ----- common VirtualBox sizing helper -----
+  def vb(vmcfg, mem, cpus, name)
+    vmcfg.vm.provider "virtualbox" do |v|
+      v.memory = mem
+      v.cpus   = cpus
+      v.name   = name
+      v.gui    = false
+    end
+  end
+
+  # =========================================================================
+  # ATTACKER (Kali) — dmz only
+  # =========================================================================
+  config.vm.define "attacker" do |m|
+    m.vm.box = "kalilinux/rolling"     # or use your own; see lab/linux/install-tools.sh
+    m.vm.hostname = "attacker"
+    m.vm.network "private_network", ip: "10.0.10.5", virtualbox__intnet: "dmz"
+    vb(m, 4096, 2, "lpt-attacker")
+    m.vm.provision "shell", privileged: true, inline: <<-SH
+      echo "[+] Attacker box. Run lab/linux/install-tools.sh to load the toolkit."
+      apt-get update -y || true
+    SH
+  end
+
+  # =========================================================================
+  # WEB / DMZ foothold — dual-homed (dmz + internal) = your first pivot
+  # =========================================================================
+  config.vm.define "web" do |m|
+    m.vm.box = "bento/ubuntu-22.04"
+    m.vm.hostname = "web"
+    m.vm.network "private_network", ip: "10.0.10.20", virtualbox__intnet: "dmz"
+    m.vm.network "private_network", ip: "10.0.20.21", virtualbox__intnet: "internal"
+    vb(m, 1536, 1, "lpt-web")
+    m.vm.provision "shell", privileged: true, inline: <<-SH
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y apache2 php libapache2-mod-php openssh-server docker.io
+      systemctl enable --now ssh docker
+      # Deliberately weak: an SSH user with a guessable password (brute practice)
+      id devops || useradd -m -s /bin/bash devops
+      echo 'devops:Password123' | chpasswd
+      # Enable password auth + log to a poison-able file (LFI->log-poison practice)
+      sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+      systemctl restart ssh
+      # A vulnerable web app (DVWA) so the foothold is web-first
+      docker rm -f dvwa 2>/dev/null || true
+      docker run -d --name dvwa -p 80:80 vulnerables/web-dvwa || echo "[!] pull dvwa later"
+      # IP forwarding so this host can act as a pivot into 10.0.20.0/24
+      echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-forward.conf && sysctl -p /etc/sysctl.d/99-forward.conf
+      echo "[+] web/pivot ready: DVWA on :80, weak SSH devops:Password123, dual-homed."
+    SH
+  end
+
+  # =========================================================================
+  # DOMAIN CONTROLLER (Windows) — internal only
+  #   After boot: RDP/WinRM in and run ../windows/setup-dc.ps1
+  # =========================================================================
+  config.vm.define "dc", autostart: false do |m|
+    m.vm.box = "gusztavvargadr/windows-server-2022-standard"
+    m.vm.hostname = "DC01"
+    m.vm.network "private_network", ip: "10.0.20.10", virtualbox__intnet: "internal"
+    m.vm.communicator = "winrm"
+    vb(m, 4096, 2, "lpt-dc")
+    m.vm.provision "shell", privileged: true, inline: <<-PS1
+      Write-Host "[+] DC base up. Now run setup-dc.ps1 (Phase 1 then Phase 2 after reboot)."
+    PS1
+  end
+
+  # =========================================================================
+  # MEMBER SERVER (Windows) — internal only  (relay + local privesc target)
+  # =========================================================================
+  config.vm.define "member", autostart: false do |m|
+    m.vm.box = "gusztavvargadr/windows-server-2022-standard"
+    m.vm.hostname = "SRV01"
+    m.vm.network "private_network", ip: "10.0.20.20", virtualbox__intnet: "internal"
+    m.vm.communicator = "winrm"
+    vb(m, 3072, 2, "lpt-member")
+    m.vm.provision "shell", privileged: true, inline: <<-PS1
+      Write-Host "[+] Member base up. Run setup-member-server.ps1 -DcIp 10.0.20.10."
+    PS1
+  end
+
+  # =========================================================================
+  # INTERNAL LINUX — dual-homed (internal + deep) = the SECOND pivot
+  # =========================================================================
+  config.vm.define "linux2" do |m|
+    m.vm.box = "bento/ubuntu-22.04"
+    m.vm.hostname = "linux2"
+    m.vm.network "private_network", ip: "10.0.20.30", virtualbox__intnet: "internal"
+    m.vm.network "private_network", ip: "10.0.30.31", virtualbox__intnet: "deep"
+    vb(m, 1024, 1, "lpt-linux2")
+    m.vm.provision "shell", privileged: true, inline: <<-SH
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y && apt-get install -y openssh-server
+      systemctl enable --now ssh
+      id svc || useradd -m -s /bin/bash svc
+      echo 'svc:Welcome1' | chpasswd
+      # Deliberate privesc: passwordless sudo (sudo -l practice)
+      echo 'svc ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/99-svc && chmod 440 /etc/sudoers.d/99-svc
+      echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-forward.conf && sysctl -p /etc/sysctl.d/99-forward.conf
+      echo "[+] linux2 ready: svc:Welcome1 (NOPASSWD sudo), dual-homed to deep net."
+    SH
+  end
+
+  # =========================================================================
+  # DEEP TARGET — deep only (reachable ONLY via double pivot through linux2)
+  # =========================================================================
+  config.vm.define "deep" do |m|
+    m.vm.box = "bento/ubuntu-22.04"
+    m.vm.hostname = "deep"
+    m.vm.network "private_network", ip: "10.0.30.40", virtualbox__intnet: "deep"
+    vb(m, 1024, 1, "lpt-deep")
+    m.vm.provision "shell", privileged: true, inline: <<-SH
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y && apt-get install -y openssh-server
+      systemctl enable --now ssh
+      id admin || useradd -m -s /bin/bash admin
+      echo 'admin:S3cr3tDeep!' | chpasswd
+      # A SUID privesc path (GTFOBins practice): SUID find
+      cp /usr/bin/find /usr/local/bin/find-suid && chmod 4755 /usr/local/bin/find-suid
+      mkdir -p /root/flags && echo "FLAG{double_pivot_reached}" > /root/flags/rootflag.txt
+      echo "FLAG{deep_user_access}" > /home/admin/userflag.txt
+      echo "[+] deep target ready: admin:S3cr3tDeep!, SUID privesc, flags planted."
+    SH
+  end
+end
