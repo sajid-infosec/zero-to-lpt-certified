@@ -55,7 +55,7 @@ The **CPENT‑AI** exam is a **100% practical, remote-proctored, open-book** ass
 
 ```bash
 # 1. Clone your local copy up to GitHub (see "Publishing" below), then:
-git clone https://github.com/<your-username>/zero-to-lpt-certified.git
+git clone https://github.com/sajid-infosec/zero-to-lpt-certified.git
 cd zero-to-lpt-certified
 
 # 2. Read the plan
@@ -116,19 +116,6 @@ zero-to-lpt-certified/
 
 ---
 
-## Publishing to GitHub
-
-This repo is delivered **git-initialized with commits**, ready to push:
-
-```bash
-# create an EMPTY repo named "zero-to-lpt-certified" on github.com first, then:
-cd zero-to-lpt-certified
-git remote add origin https://github.com/<your-username>/zero-to-lpt-certified.git
-git branch -M main
-git push -u origin main
-```
-
----
 
 ## Contributing
 
